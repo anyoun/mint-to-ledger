@@ -5,49 +5,189 @@
 
 import argparse
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from textwrap import dedent
 
-expected_headers = ['Date', 'Description', 'Original Description', 'Amount', 
+expected_headers = ['Date', 'Description', 'Original Description', 'Amount',
     'Transaction Type', 'Category', 'Account Name', 'Labels', 'Notes']
-    
+
 parser = argparse.ArgumentParser()
 parser.add_argument("csv_file", help="exported transactions file from Mint")
-parser.add_argument("ledger_file", help="file to write ledger transaction list to")
+parser.add_argument("ledger_file", help="file to write ledger transaction list to", default="hledger.journal")
 args = parser.parse_args()
+
+categoryMap = {
+    "Paycheck": "Income:Paycheck",
+    "Investment": "Income:Investment",
+    "Returned Purchase": "Income:Returned Purchase",
+    "Bonus": "Income:Bonus",
+    "Interest Income": "Income:Interest Income",
+    "Reimbursement": "Income:Reimbursement",
+    "Rental Income": "Income:Rental Income",
+
+    "Cash & ATM": "Expenses:Uncategorized:Cash & ATM",
+    "Check": "Expenses:Uncategorized:Cash & ATM",
+    "Exclude From Mint": "Expenses:Uncategorized:Exclude From Mint",
+
+    "Arts": "Entertainment:Arts",
+    "Music": "Entertainment:Music",
+    "Movies & DVDs": "Entertainment:Movies & DVDs",
+    "Newspaper & Magazines": "Entertainment:Newspaper & Magazines",
+
+    "Tuition": "Education:Tuition",
+    "Student Loan": "Education:Student Loan",
+    "Books & Supplies": "Education:Books & Supplies",
+
+    "Clothing": "Shopping:Clothing",
+    "Clothes & Accessories": "Shopping:Clothing",
+    "Books": "Shopping:Books",
+    "Electronics & Software": "Shopping:Electronics & Software",
+    "Hobbies": "Shopping:Hobbies",
+    "Sporting Goods": "Shopping:Sporting Goods",
+
+    "Laundry": "Personal Care:Laundry",
+    "Hair": "Personal Care:Hair",
+    "Spa & Massage": "Personal Care:Spa & Massage",
+
+    "Dentist": "Health & Fitness:Dentist",
+    "Doctor": "Health & Fitness:Doctor",
+    "Eyecare": "Health & Fitness:Eyecare",
+    "Pharmacy": "Health & Fitness:Pharmacy",
+    "Health Insurance": "Health & Fitness:Health Insurance",
+    "Gym": "Health & Fitness:Gym",
+    "Sports": "Health & Fitness:Sports",
+
+    "Kids Activites": "Kids:Kids Activites",
+    "Allowance": "Kids:Allowance",
+    "Baby Supplies": "Kids:Baby Supplies",
+    "Babysitter & Daycare": "Kids:Babysitter & Daycare",
+    "Child Support": "Kids:Child Support",
+    "Toys": "Kids:Toys",
+
+    "Groceries": "Food & Dining:Groceries",
+    "Coffee shops": "Food & Dining:Coffee shops",
+    "Fast Food": "Food & Dining:Fast Food",
+    "Restaurants": "Food & Dining:Restaurants",
+    "Alchohol & Bars": "Food & Dining:Alchohol & Bars",
+
+    "Gift": "Gits & Donations:Gift",
+    "Charity": "Gifts & Donations:Charity",
+    "Church": "Gifts & Donations:Church",
+
+    "Deposit": "Investments:Deposit",
+    "Withdrawal": "Investments:Withdrawal",
+    "Dividends & Cap Gains": "Investments:Dividends & Cap Gains",
+    "Buy": "Investments:Buy",
+    "Sell": "Investments:Sell",
+
+    "Television": "Bills & Utilities:Television",
+    "Cable/Satellite TV": "Bills & Utilities:Television",
+    "Phone": "Bills & Utilities:Home Phone",
+    "Home Phone": "Bills & Utilities:Home Phone",
+    "Internet": "Bills & Utilities:Internet",
+    "Mobile Phone": "Bills & Utilities:Mobile Phone",
+    "Wireless/Cellular": "Bills & Utilities:Mobile Phone",
+    "Utilities": "Utilities:Utilities",
+
+    "Gas / Fuel": "Auto & Transport:Gas & Fuel",
+    "Gas & Fuel": "Auto & Transport:Gas & Fuel",
+    "Parking": "Auto & Transport:Parking",
+    "Service & Auto Parts": "Auto & Transport:Service & Auto Parts",
+    "Auto Payment": "Auto & Transport:Auto Payment",
+    "Auto Insurance": "Auto & Transport:Auto Insurance",
+    "Service & Auto Parts": "Auto & Transport:Service & Auto Parts",
+
+    "Air Travel": "Travel:Air Travel",
+    "Hotel": "Travel:Hotel",
+    "Rental Car & Taxi": "Travel:Rental Car & Taxi",
+    "Vacation": "Travel:Vacation",
+
+    "Service Fee": "Fees & Charges:Service Fee",
+    "Late Fee": "Fees & Charges:Late Fee",
+    "Finance Charge": "Fees & Charges:Finance Charge",
+    "ATM Fee": "Fees & Charges:ATM Fee",
+    "Bank Fee": "Fees & Charges:Bank Fee",
+    "Trade Comissions": "Fees & Charges:Trade Comissions",
+    "Business Services": "Fees & Charges:Business Services",
+    "Advertising": "Fees & Charges:Advertising",
+    "Office Supplies": "Fees & Charges:Office Supplies",
+    "Printing": "Fees & Charges:Printing",
+    "Shipping": "Fees & Charges:Shipping",
+    "Legal": "Fees & Charges:Legal",
+
+    "Federal Tax": "Taxes:Federal Tax",
+    "State Tax": "Taxes:State Tax",
+    "Local Tax": "Taxes:Local Tax",
+    "Sales Tax": "Taxes:Sales Tax",
+    "Property Tax": "Taxes:Property Tax",
+}
+
+class MintTxn(object):
+    def __init__(self, t):
+        super(MintTxn, self).__init__()
+        self.date = datetime.strptime(t[0], "%m/%d/%Y")
+        self.description = t[1]
+        self.original_description = t[2]
+        self.from_account = "Assets:" + re.sub(' +', ' ', t[6])  # ledger hates double spaces
+        self.balance = self.cashflow = t[3]
+        if t[4] == 'debit':
+            # type = "Expenses"
+            self.balance = "-%s" % self.balance
+        else:
+            # type = "Income"
+            self.cashflow = "-%s" % self.cashflow
+        self.to_account = t[5]
+
+        if self.to_account in categoryMap:
+            self.to_account = categoryMap[self.to_account]
+        if not self.to_account.startswith("Income") and self.to_account != "Transfer":
+            self.to_account = "Expenses:%s" % self.to_account
 
 with open(args.csv_file) as mint_file:
     mint_reader = csv.reader(mint_file)
     transactions = [row for row in mint_reader]
-    
+
 headers, transactions = transactions[0], transactions[1:]
 
 if headers != expected_headers:
     print "ERROR: Headers in %s did not match the expected Mint transaction file headers." % filename
 
-with open(args.ledger_file, 'w') as ledger_file:    
-    for t in transactions:
-        date = datetime.strptime(t[0], "%m/%d/%Y").strftime("%Y/%m/%d")
-        description = t[1]
-        from_account = re.sub(' +', ' ', t[6])  # ledger hates double spaces
-        balance = cashflow = t[3]
-        if t[4] == 'debit': 
-            type = "Expenses"
-            balance = "-%s" % balance
-        else: 
-            type = "Income" 
-            cashflow = "-%s" % cashflow
-        category = t[5]
+mintTxns = [MintTxn(t) for t in transactions]
+
+with open(args.ledger_file, 'w') as ledger_file:
+    for (i,t) in enumerate(mintTxns):
+        # if i > 1000:
+        #     break
+        if "Transfer" == t.to_account or "Transfer" in t.description or t.to_account == "Income":
+            # print "Found transfer in %s as %s (%s) for %s" % (t.from_account, t.to_account, t.description, t.cashflow)
+            matchIdx = None
+            # Find a matching txn within 7 days with exact opposite amount in a different account
+            for j in range(i+1,len(mintTxns)):
+                if t.date - mintTxns[j].date > timedelta(7):
+                    break
+                if float(mintTxns[j].cashflow) == -float(t.cashflow) and mintTxns[j].from_account != t.from_account:
+                    matchIdx = j
+                    break
+            if matchIdx:
+                match = mintTxns[matchIdx]
+                del mintTxns[matchIdx]
+                print "\tMatched with %s as %s (%s)" % (match.from_account, match.to_account, match.description)
+                t.to_account = match.from_account
+                t.description += " [Matched with tranfer ""%s""]" % (match.description)
+            else:
+                pass
+                # print "\tNo match"
+            # Try to find matching Transfer on the other side and merge into one record
 
         # Mint has a special expense category for cash withdrawals, called "Transfer for
         # Cash Spending", which is really a transfer from Assets:<XXX> to Assets:Cash.
-        if category == "Transfer for Cash Spending":
-            type = "Assets"
-            category = "Cash"
-        
+        if t.to_account == "Transfer for Cash Spending":
+            # type = "Assets"
+            t.to_account = "Assets:Cash"
+
         print >>ledger_file, dedent("""\
-            %s * %s
-                Assets:%s  $ %s
-                %s:%s  $ %s
-        """ % (date, description, from_account, balance, type, category, cashflow))
+            %s * %s ; %s
+                %s  $ %s
+                %s  $ %s
+        """ % (t.date.strftime("%Y/%m/%d"), t.description, t.original_description, t.from_account, t.balance, t.to_account, t.cashflow))

@@ -8,6 +8,7 @@ import csv
 from datetime import datetime, timedelta
 import re
 from textwrap import dedent
+import yaml
 
 expected_headers = ['Date', 'Description', 'Original Description', 'Amount',
     'Transaction Type', 'Category', 'Account Name', 'Labels', 'Notes']
@@ -15,6 +16,7 @@ expected_headers = ['Date', 'Description', 'Original Description', 'Amount',
 parser = argparse.ArgumentParser()
 parser.add_argument("csv_file", help="exported transactions file from Mint")
 parser.add_argument("ledger_file", help="file to write ledger transaction list to", default="hledger.journal")
+parser.add_argument("options_file", help="file with conversion options", default="options.yaml")
 args = parser.parse_args()
 
 categoryMap = {
@@ -123,10 +125,21 @@ categoryMap = {
     "Property Tax": "Taxes:Property Tax",
 }
 
+account_renames = {}
+remove_duplicates = False
+remove_duplicates_from = []
+with open(args.options_file, 'r') as options_file:
+    options_dict = yaml.load(options_file)
+    remove_duplicates = options_dict['removeDuplicates']
+    for rename in options_dict['renameAccounts']:
+        account_renames[rename['from']] = rename['to']
+    remove_duplicates_from = options_dict['removeDuplicatesFrom']
+
+
 class MintTxn(object):
     def __init__(self, t):
         super(MintTxn, self).__init__()
-        self.date = datetime.strptime(t[0], "%m/%d/%Y")
+        self.date = datetime.strptime(t[0], "%m/%d/%Y").date()
         self.description = t[1]
         self.original_description = t[2]
         self.from_account = "Assets:" + re.sub(' +', ' ', t[6])  # ledger hates double spaces
@@ -143,6 +156,17 @@ class MintTxn(object):
             self.to_account = categoryMap[self.to_account]
         if not self.to_account.startswith("Income") and self.to_account != "Transfer":
             self.to_account = "Expenses:%s" % self.to_account
+        if self.from_account in account_renames:
+            self.from_account = account_renames[self.from_account]
+        self.row = ",".join(t)
+    def __eq__(self, t2):
+        return self.date == t2.date and \
+               self.description == t2.description and \
+               self.original_description == t2.original_description and \
+               self.from_account == t2.from_account and \
+               self.balance == t2.balance and \
+               self.cashflow == t2.cashflow and \
+               self.to_account == t2.to_account
 
 with open(args.csv_file) as mint_file:
     mint_reader = csv.reader(mint_file)
@@ -155,6 +179,32 @@ if headers != expected_headers:
 
 mintTxns = [MintTxn(t) for t in transactions]
 
+dupCount = 0
+with open("removed.csv", 'w') as removed_file, open("dups.csv", 'w') as dups_file:
+    for (i,t) in enumerate(mintTxns):
+        in_range = False
+        for ex in remove_duplicates_from:
+            if t.from_account == ex['account'] and t.date >= ex['startDate'] and t.date <= ex['endDate']:
+                in_range = True
+            break
+
+        for j in range(i+1,len(mintTxns)):
+            t2 = mintTxns[j]
+            if t.date != t2.date: # Assuming sorted txns
+                break
+            if t == t2:
+                dupCount += 1
+                if in_range:
+                    del mintTxns[j]
+                    print >>removed_file, t.row
+                else:
+                    print >>dups_file, t.row
+                break
+if remove_duplicates:
+    print "Removed %s duplicate transactions." % (dupCount)
+else:
+    print "Detected %s duplicate transactions." % (dupCount)
+
 with open(args.ledger_file, 'w') as ledger_file:
     for (i,t) in enumerate(mintTxns):
         # if i > 1000:
@@ -164,7 +214,7 @@ with open(args.ledger_file, 'w') as ledger_file:
             matchIdx = None
             # Find a matching txn within 7 days with exact opposite amount in a different account
             for j in range(i+1,len(mintTxns)):
-                if t.date - mintTxns[j].date > timedelta(7):
+                if t.date - mintTxns[j].date > timedelta(7): # Assuming sorted txns
                     break
                 if float(mintTxns[j].cashflow) == -float(t.cashflow) and mintTxns[j].from_account != t.from_account:
                     matchIdx = j
@@ -172,7 +222,7 @@ with open(args.ledger_file, 'w') as ledger_file:
             if matchIdx:
                 match = mintTxns[matchIdx]
                 del mintTxns[matchIdx]
-                print "\tMatched with %s as %s (%s)" % (match.from_account, match.to_account, match.description)
+                # print "\tMatched with %s as %s (%s)" % (match.from_account, match.to_account, match.description)
                 t.to_account = match.from_account
                 t.description += " [Matched with tranfer ""%s""]" % (match.description)
             else:
